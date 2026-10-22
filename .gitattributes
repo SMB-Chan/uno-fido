@@ -1,0 +1,5 @@
+# Windows PowerShell 5.1 reads a BOM-less .ps1 in the system ANSI code page
+# (Shift-JIS here), so the Japanese literals turn into parse errors
+# ("Unterminated string literal"). Keep these files byte-exact: the UTF-8 BOM
+# must survive checkout, and -text stops git from rewriting the bytes.
+*.ps1 -text

@@ -254,6 +254,45 @@ uint16_t req_received_bytes = 0;
 bool req_ready = false;
 bool req_streaming = false;
 
+// ---------------------------------------------------------------------------
+// 328P recovery
+// The 328P stopped answering the UART once (10/23 03:49:40, the last good
+// GetInfo) while the 16U2 kept serving CTAPHID_INIT. Every CBOR command then
+// came back as a 1-byte 0x7F from this chip, and only a USB replug cleared it.
+//
+// PD7 drives ATmega328P RESET through the Uno's 0.1uF auto-reset cap, so the
+// bridge can reboot a wedged 328P itself. If the RESET-EN solder jumper is
+// open this pulse does nothing and the old behaviour (0x7F until replug) stays.
+// ---------------------------------------------------------------------------
+#define P328_RST_BIT 7
+static bool p328_recovering = false;
+static uint16_t boot_wait_ms = 0;
+
+static void p328_reset_pulse(void) {
+  // Already waiting for the ready beacon: do not reset again mid-boot, or a
+  // slow boot keygen (one P-256 multiply) would be restarted forever.
+  if (p328_recovering) return;
+  p328_recovering = true;
+
+  DDRD |= (1 << P328_RST_BIT);
+  PORTD &= ~(1 << P328_RST_BIT);      // falling edge into the coupling cap
+  for (uint8_t i = 0; i < 2; i++) { wdt_reset(); _delay_ms(1); }
+  DDRD &= ~(1 << P328_RST_BIT);       // high-Z: the cap pulls RESET back up
+
+  boot_ready = false;
+  boot_wait_ms = 0;
+  waiting_328p = false;
+  discard_328p_response = false;
+  pending_getinfo = false;
+  resp_follow = 0;
+  keepalive_ticks = 0;
+  keepalive_count = 0;
+  req_streaming = false;
+  req_pkt_count = 0;
+  req_ready = false;
+  uart_flush_rx();
+}
+
 static bool ctap_cmd_needs_up(uint8_t ctap_cmd) {
   // Reset (0x07) stays PROCESSING-only: UPNEEDED made Windows Hello show a
   // touch prompt, then CANCEL the transaction before our auto-UP OK arrived.
@@ -339,6 +378,10 @@ static bool stream_to_328p(const uint8_t *pkt64, bool is_first, bool is_last) {
     req_ready = false;
     discard_328p_response = true;
     resp_follow = 0;
+    // No ACK on all four attempts: the 328P is not reading its UART at all.
+    // Reboot it so the next request works instead of every request returning
+    // 0x7F until the key is unplugged.
+    p328_reset_pulse();
     return false;
   }
   frame_seq++;
@@ -685,8 +728,6 @@ int main(void) {
   usb_init();
   wdt_enable(WDTO_8S);
 
-  uint16_t boot_ms = 0;
-
   while (1) {
     wdt_reset();
     if (!usb_configured) continue;
@@ -713,10 +754,16 @@ int main(void) {
     // No KEEPALIVE here: that is what Windows Hello shows as "準備しています".
     if (!boot_ready) {
       _delay_ms(1);
-      boot_ms++;
+      boot_wait_ms++;
       if (UCSR1A & (1 << RXC1)) {
         uint8_t b = UDR1;
-        if (b == UART_READY) boot_ready = true;
+        if (b == UART_READY) {
+          boot_ready = true;
+          // A fresh 328P (first boot or after a recovery reset) has no reply
+          // in flight, so never drop the first response it sends.
+          p328_recovering = false;
+          discard_328p_response = false;
+        }
       }
       // 328P builds the PIN agreement key before 0xA6. That is one P-256
       // multiply (up to ~20s). Forwarding earlier hits a deaf UART.
@@ -734,7 +781,9 @@ int main(void) {
         hid_tx[7] = 0x01;
         send_usb_hid_report(hid_tx);
       }
-      if (boot_ms >= 40000) boot_ready = true;
+      // The 328P blinks its last-command report (~10s) and then builds the
+      // PIN key before 0xA6, so allow more than the old 40s.
+      if (boot_wait_ms >= 90000) boot_ready = true;
     }
     if (boot_ready && req_ready && !req_streaming && !waiting_328p) {
       forward_buffered_request_to_328p();
@@ -767,6 +816,10 @@ int main(void) {
           waiting_328p = false;
           discard_328p_response = true;
           send_ctap_status(active_cid, 0x7F);
+          // It ACKed the frame but never produced a reply, so it is stuck
+          // mid-command (the modInv loop or a stack overflow). Reboot it now;
+          // the next request is served by a clean 328P.
+          p328_reset_pulse();
         }
       }
     }

@@ -189,6 +189,7 @@ static cmpresult_t uECC_vli_cmp_unsafe(const uECC_word_t *left,
 extern uint8_t *eccScratch(void);
 extern uint8_t *eccHoldBuf(void);
 extern uint8_t *eccSecBuf(void);
+extern void eccFeed(void);
 static uint8_t *ew(int off) { return eccScratch() + off; }
 
 #if default_RNG_defined
@@ -893,6 +894,9 @@ static void EccPoint_mult(uECC_word_t * result,
 #if defined(__AVR__)
         /* PINB bit 5 toggles the Uno L LED. Solid means this loop is not running. */
         if ((i & 15) == 0) __asm__ volatile ("sbi 0x03, 5" ::: "memory");
+        /* One P-256 multiply is 20-40s; feed the 8s watchdog while this loop
+           demonstrably advances. uECC_vli_modInv is not fed on purpose. */
+        if ((i & 15) == 0) eccFeed();
 #endif
     }
 

@@ -8,13 +8,8 @@ Windows Hello セットアップ
 ```
 
 このダイアログは **Windows の WebAuthn スタック（webauthn.dll / CredentialUIBroker.exe）** が出すもので、
-CTAP2 のどこで失敗しても **同じ文面** になります。つまり「キーがダメ」とは限らず、
-
-- Windows 側の設定で止まっている
-- ファームが返したステータスが期待外（未実装コマンド・PIN 検証・容量不足など）
-- Microsoft アカウント側がキーを認定していない（＝キーの責任ではない）
-
-のどれでも同じ画面になります。**まずどこで止まっているかを確定させる**のが本ドキュメントの目的です。
+CTAP2 のどこで失敗しても **同じ文面** になります。したがって最初にやることは
+「**16U2 と 328P のどちらで死んでいるか**」を確定させることです。
 
 診断: [`tools/Get-WebAuthnTrace.ps1`](../tools/Get-WebAuthnTrace.ps1)（読み取りのみ・変更なし）
 
@@ -24,134 +19,198 @@ powershell -ExecutionPolicy Bypass -File .\tools\Get-WebAuthnTrace.ps1 -Mode Bot
 # → 120 秒の待ち時間の間に、エラーを 1 回だけ再現する
 ```
 
-出力の `REQ` が Windows が投げた CTAP2 コマンド、`RES` がキーが返したステータスです。
-[読み方の表](#4-トレースの読み方)で原因がほぼ確定します。
+> **注意**: このスクリプトは UTF-8 **BOM 付き** で保存されています。BOM が無いと
+> Windows PowerShell 5.1 がシステム ANSI（Shift-JIS）として読み、
+> `Unterminated string literal` で 1 行も実行されません（`.gitattributes` で `*.ps1 -text`）。
 
 ---
 
-## 1. 前提: 個人の Microsoft アカウントで「Windows へのサインイン」は原則できない
+## 1. これまでに確定したこと（実測）
 
-いちばん多い落とし穴です。
+トレース（`Microsoft-Windows-WebAuthN/Operational`）で **157 件の GetInfo** を集計した結果:
 
-| やりたいこと | 使う画面 | 個人の Microsoft アカウント | 職場/学校 (Entra ID) |
-| --- | --- | --- | --- |
-| **Web のパスキー**（Microsoft アカウントのセキュリティ情報に追加） | `account.microsoft.com` → セキュリティ → 「サインイン方法の追加」 | 公式サポート対象 | サポート対象 |
-| **Windows へのセキュリティキーサインイン**（ロック画面でキーを使う） | `設定 > アカウント > サインイン オプション > セキュリティ キー` | **非対応**（Entra ID 参加 + Windows Hello for Business / Intune か GPO で有効化した環境のみ） | サポート対象 |
+| 応答 | 件数 | 出どころ |
+| --- | --- | --- |
+| 完全な CBOR（≥2 バイト、status `0x00`） | 136 | **328P が正常応答** |
+| 1 バイト `0x01` | 12 | **16U2 が合成**（`send_ctap_status`） |
+| 1 バイト `0x02` | 2 | **16U2 が合成** |
+| 1 バイト `0x7F` | **7** | **16U2 が合成** |
 
-「Windows Hello セットアップ」というタイトルのダイアログは **この Windows サインイン側**の経路です。
-個人アカウントでここを開くと、キーが正常でも `このセキュリティ キーは使用できません` で止まることがあります。
-（参考: [Microsoft Entra: FIDO2 セキュリティ キーによる Windows へのサインイン](https://learn.microsoft.com/ja-jp/entra/identity/authentication/howto-authentication-passwordless-security-key-windows)）
+決定的なのは時刻です。
 
-**確認してほしいこと**: エラーが出たのは
-`設定 > アカウント > サインイン オプション > セキュリティ キー > 管理` ですか？
-それとも `account.microsoft.com` の「サインイン方法の追加」ですか？
-後者で失敗しているなら、原因はファームではなく **キーの認定（attestation）** の可能性が高いです（[5 章](#5-microsoft-アカウントが要求する認定attestationの壁)）。
+- 最後に 328P が正常応答したのは **10/23 03:49:40**（GetInfo を 152 バイトで返した）
+- それ以降、328P からの CBOR 応答は **0 件**
+- その間も 16U2 は CTAPHID_INIT（`0x86`）に応答し続けていた
+
+```
+[04:42:18.445] INIT 応答 OK          ← 16U2 は生きている（USB は正常）
+[04:42:18.581] REQ 0x04 GetInfo
+              RES 0x7F (1 バイト)    ← 16U2 が代わりに返した値
+[04:42:18.581] デバイス スレッド終了
+[04:42:18.687] エラー 0x80070032
+```
+
+**328P は UART に一切応答していない**（フレーム ACK すら返らない）。
+16U2 は 4 回再送し、それでも ACK が無いので `send_ctap_status()` で `0x7F` を返しています。
+`0x08`（getNextAssertion）も `0x0A`（credMgmt）も **一度も送られていない** ので、
+未実装コマンドは今回の原因ではありません。
+
+→ 症状は「**328P 単体のウエッジ**」。USB を挿し直すまで復帰しませんでした。
+
+### なぜ `0x7F` を見て「ファーム内部エラー」と判断してはいけないか
+
+`0x7F` は 2 か所から出ます。
+
+| 出どころ | 条件 | 見分け方 |
+| --- | --- | --- |
+| **328P** `ctapErr(0x7F)` | 乱数・uECC・署名の失敗 | 応答が CBOR として妥当 / 直前まで同一コマンドが成功している |
+| **16U2** `send_ctap_status(cid, 0x7F)` | 328P から応答が来ない（4 か所: UART 送信失敗・GetInfo 再送失敗・keepalive タイムアウト） | **1 バイトだけ**。`GetInfo` に対して返るのは構造上あり得ない（`buildCtap2GetInfo()` は必ず `0x00` で始まる CBOR を返す） |
+
+**`REQ 0x04` に対して 1 バイトの `0x7F`** が返ったら、それは 328P ではなく 16U2 の応答です。
 
 ---
 
-## 2. Windows 側で先に潰すべき既知の問題
+## 2. 328P ウエッジ対策（実装済み）
+
+「挿し直すまで死ぬ」を「次のリクエストで自動復帰する」に変えました。
+
+### 2.1 16U2 → 328P のハードリセット
+
+ATmega16U2 の **PD7** は、Uno の 0.1 µF 自動リセット用コンデンサ経由で 328P の RESET に繋がっています。
+16U2 は次の 2 つの場面でこの線をパルスし、328P を再起動します。
+
+- `send_frame_acked()` が 4 回とも ACK を得られなかった（328P が UART を読んでいない）
+- keepalive が上限に達した（フレームは ACK したが応答を返さない = コマンド内で停止）
+
+その後 `boot_ready = false` に戻り、328P の `0xA6` ビーコンを最大 90 秒待ちます
+（再起動直後は「直前コマンドの点滅表示」+ 起動時 P-256 鍵生成が走るため）。
+
+> **前提 1**: Uno R3 の RESET-EN ジャンパ（半田ジャンパ）が導通していること。
+> 切ってある個体ではこのパルスは無効で、従来どおり `0x7F` のままになります。
+>
+> **前提 2**: 同梱の `fido_16u2_hid.hex` は**この変更より前のビルド**です。
+> 必ず再ビルドしてから書き込んでください（`.c` を変えただけでは効きません）。
+>
+> ```powershell
+> powershell -ExecutionPolicy Bypass -File .\fido_16u2_hid\build_16u2.ps1     # .hex を再生成
+> powershell -ExecutionPolicy Bypass -File .\fido_16u2_hid\flash_16u2_fido_hid.ps1
+> ```
+>
+> 現在の症状（1 バイトの `0x7F`）は 16U2 側の判断なので、**16U2 の更新が必須**です。
+> 328P 側（ウォッチドッグと LED 表示）は通常のスケッチ書き込みで反映されます。
+
+### 2.2 328P 側のウォッチドッグ
+
+`WDTO_8S` を有効化し、次の場所で明示的に供給します。
+
+| 場所 | 理由 |
+| --- | --- |
+| `loop()` 先頭 | 通常の進行 |
+| `initStorage()` の全消去ループ | EEPROM 全消去は約 3.4 秒 |
+| `entropyCollectUntil()` | 256 回の ADC 読み取り |
+| `waitForUserPresence()` / `holdBinaryPresence()` | 25 秒 / 1.5 秒の待ち |
+| **`EccPoint_mult()` のビットループ（`eccFeed()`）** | 1 回の P-256 乗算が 20〜40 秒かかるため |
+
+**`uECC_vli_modInv()` にはあえて供給していません。**
+この関数は入力が壊れると `while (a != b)` が終わらない古典的な無限ループになり得ます。
+そこで供給しないことで、本当に無限ループした場合は 8 秒でウォッチドッグが働き、
+チップが自動再起動します（＝ウエッジが残らない）。
+
+### 2.3 直前に実行していたコマンドの記録
+
+`executeCtap2InPlace()` が CTAP コマンドバイトを EEPROM `1014` に保存し、
+ウォッチドッグ再起動後は **L LED の点滅回数** でそれを知らせます（120ms 点灯 × N 回、2 セット）。
+
+| 点滅数 | コマンド |
+| --- | --- |
+| 1 | `authenticatorMakeCredential` |
+| 2 | `authenticatorGetAssertion` |
+| 4 | `authenticatorGetInfo`（＝コマンド依存ではないウエッジ） |
+| 6 | `authenticatorClientPIN` |
+| 7 | `authenticatorReset` |
+| 11 | `authenticatorSelection` |
+
+再起動回数は EEPROM `1015` に加算されます。
+
+---
+
+## 3. Windows 側で先に潰すべき既知の問題
 
 ファームを疑う前に、**YubiKey でも同じ症状になる**既知の問題を確認してください。
 
 1. **パスキー許可がオフ**（Windows 11 24H2 以降）
    `設定 > プライバシーとセキュリティ > パスキー` の「アプリでのパスキーの作成と使用を許可する」がオンか。
    ここがオフだと、U2F のセキュリティキーでも **Windows セキュリティのダイアログ自体が出ず**に失敗します。
-   （スタートメニューの検索で "passkeys" と打つと `アカウント > パスキー` という別画面に飛ぶので注意）
 2. **Windows 11 24H2 のビルド不具合**
-   build `26100.4652` 〜 `26100.6584` 未満では、`セキュリティ キー > 管理` で PIN 変更や管理が失敗します。
+   build `26100.4652` 〜 `26100.6584` 未満では `セキュリティ キー > 管理` が失敗します。
    **KB5065426（build 26100.6584）で修正済み**。
    （参考: [Yubico サポート](https://support.yubico.com/hc/en-us/articles/21190316012444--resolved-Windows-Account-Management-in-Windows-11-24H2-Unable-to-manage-FIDO-application-on-Security-Key-YubiKey-or-YubiKey-Bio)）
-3. **サードパーティ製の認証プロバイダー**
-   Duo Security、Kensington / VeriMark のソフト、生体認証ドライバなどが Hello を乗っ取ることがあります。
-   スクリプトの `[注意] サードパーティ製の認証プロバイダー` に出たら一旦アンインストール。
+3. **サードパーティ製の認証プロバイダー**（Duo、Kensington / VeriMark 等）
 4. **「Microsoft アカウント用に Windows Hello サインインのみを許可する」がオン**
-   `設定 > アカウント > サインイン オプション > 追加の設定` のトグル。オフにして再試行。
-5. **スロット満杯 / 既存資格情報の衝突**
-   このキーは EEPROM に **5 スロット**しか持ちません。過去のテストで埋まっていると
-   `0x28 (KEY_STORE_FULL)`、同じ RP の資格情報が残っていると `0x19 (CREDENTIAL_EXCLUDED)` を返します。
-   Windows はどちらも「このセキュリティ キーは使用できません」に丸めます。
-   `web_app/index.html` の 🗑️ **鍵リセット**（`CTAP2 07` = authenticatorReset）で初期化してから試してください。
-
----
-
-## 3. ファーム側の現状（Microsoft の「互換キー」要求との差）
-
-Microsoft は Windows で使うキーに次の 4 機能を **必須** としています
-（[Microsoft-compatible security key](https://learn.microsoft.com/en-us/windows/security/identity-protection/hello-for-business/microsoft-compatible-security-key)）。
-
-| # | 要求 | このリポジトリの実装 | 備考 |
-| --- | --- | --- | --- |
-| 1 | Resident key（discoverable credential） | ✅ | `MAX_SLOTS = 5`、`rk: true` を広告 |
-| 2 | Client PIN | ✅ | PIN/UV Auth Protocol 1 と 2、setPIN / changePIN / getPINToken(0x05,0x09) |
-| 3 | hmac-secret | ✅ | makeCredential の拡張 + getAssertion の暗号化 salt |
-| 4 | Multiple accounts per RP | ❌ | `authenticatorGetNextAssertion (0x08)` が `0x2A` を返すだけ |
-| — | `credMgmt`（`設定 > セキュリティ キー > 管理` が使う） | ❌ | `authenticatorCredentialManagement (0x0A)` 未実装 |
-| — | `largeBlobs` | ❌ | 未広告 |
-| — | Attestation（認定・x5c 証明書チェーン） | ❌ | 自己署名の packed attestation。AAGUID はダミー |
-
-`getNextAssertion` と `credMgmt` は **Windows / Chrome の実装が「あれば使う」** もので、
-無いこと自体が即エラーになるとは限りません。ただし Windows 11 の
-`セキュリティ キー > 管理` とパスキー一覧は `credMgmt` を前提にしています。
-トレースで `0x0A` や `0x08` に `0x2A` が返っていれば、ここが直接の原因です。
+5. **スロット満杯 / 既存資格情報の衝突**（`0x28` / `0x19`）→ 🗑️ 鍵リセット（`CTAP2 07`）
 
 ---
 
 ## 4. トレースの読み方
 
-`RES`（キーが返した 1 バイト目）で判断します。
-
-| RES | 名前 | 意味 / 次の手 |
+| `RES` | 名前 | 次の手 |
 | --- | --- | --- |
-| `0x00` | OK | そのコマンドは成功。失敗しているのは**別のコマンド**（REQ を遡る） |
-| `0x2A` | UNSUPPORTED_OPTION | `REQ` が `0x08` なら getNextAssertion 未実装、`0x0A` なら credMgmt 未実装 → **ファームで実装可能** |
+| `0x00` + CBOR | OK | 失敗しているのは**別のコマンド**（REQ を遡る） |
+| `0x7F`（1 バイト） | **16U2 合成** | 328P が無応答。2 章の自動復帰が効いているか、RESET-EN を確認 |
+| `0x7F`（CBOR として妥当） | 328P 内部エラー | uECC / 乱数 / 署名。LED の点滅でコマンドを特定 |
+| `0x2A`（`REQ`=`0x08`/`0x0A`） | UNSUPPORTED_OPTION | 未実装。Windows の管理 UI を使うなら実装対象 |
 | `0x28` | KEY_STORE_FULL | 5 スロット満杯 → 鍵リセット |
 | `0x19` | CREDENTIAL_EXCLUDED | 既存資格情報と衝突 → 鍵リセット |
-| `0x2D` | NO_CREDENTIALS | look up 対象なし（Windows 側が RP ID を取り違えている場合も） |
 | `0x31` / `0x35` | PIN_INVALID / PIN_NOT_SET | PIN/UV の状態不整合 |
-| `0x33` | PIN_AUTH_INVALID | pinUvAuthParam の検証、または RP バインド（`PIN_RP_ADDR`）で失敗 → **ファーム要修正** |
-| `0x39` | REQUEST_TOO_LARGE | 512 バイト超（Windows Hello の makeCredential は長くなりがち） |
-| `0x7F` | ファーム内部エラー | 乱数・uECC・署名の失敗。LED が点滅していないか確認 |
+| `0x33` | PIN_AUTH_INVALID | pinUvAuthParam 検証・RP バインドで失敗 |
+| `0x39` | REQUEST_TOO_LARGE | 512 バイト超 |
 
-`REQ` が `0x04`（GetInfo）で止まる → Windows 側（プロバイダー無効・パスキー許可オフ）。
-イベントが 1 件も出ない → ダイアログがキーに到達していない（USB / 16U2 / プロバイダー）。
+イベントが 1 件も出ない → ダイアログがキーに到達していない（プロバイダー無効・パスキー許可オフ・USB）。
 
 ---
 
-## 5. Microsoft アカウントが要求する認定（attestation）の壁
+## 5. 前提: 個人の Microsoft アカウントで「Windows へのサインイン」は原則できない
 
-Microsoft は、パスキー/セキュリティキーの互換性を **FIDO Alliance Metadata Service (MDS)** で判断します。
-ベンダーは MDS にメタデータを登録し、キーは **有効な attestation statement** を返す必要があります。
-（[Microsoft Entra: FIDO2 セキュリティ キーのベンダー向け attestation 要件](https://learn.microsoft.com/en-us/entra/identity/authentication/concept-fido2-hardware-vendor)、
-[FIDO2 準拠の要求](https://support.microsoft.com/ja-jp/accounts-billing/work-school/set-up-a-security-key-as-your-verification-method)）
+| やりたいこと | 使う画面 | 個人の Microsoft アカウント | 職場/学校 (Entra ID) |
+| --- | --- | --- | --- |
+| **Web のパスキー**（Microsoft アカウントのセキュリティ情報に追加） | `account.microsoft.com` → セキュリティ → 「サインイン方法の追加」 | 公式サポート対象 | サポート対象 |
+| **Windows へのセキュリティキーサインイン**（ロック画面でキーを使う） | `設定 > アカウント > サインイン オプション > セキュリティ キー` | **非対応**（Entra ID 参加 + WHfB / Intune か GPO で有効化した環境のみ） | サポート対象 |
 
-このキーは AAGUID が `ELEGOO_UNO_FIDO2` のダミーで、attestation は自己署名（x5c なし）です。
-そのため **Microsoft アカウントのパスキー登録では、サーバー側で拒否され得ます**。
-これはファームのバグではなく、ベンダー認定（＝ベンダーのルート CA と MDS 登録）が無いことによる制約で、
-個人が回避するのは現実的ではありません。
-
-一方、**WebAuthn の RP が attestation を要求しないサイト（Misskey / GitHub / Google など）では普通に使えます**
-（このリポジトリでもブラウザ経由の登録・ログインは成功している）。
+「Windows Hello セットアップ」というタイトルのダイアログは **Windows サインイン側**の経路です。
+（参考: [FIDO2 セキュリティ キーによる Windows へのサインイン](https://learn.microsoft.com/ja-jp/entra/identity/authentication/howto-authentication-passwordless-security-key-windows)）
 
 ---
 
-## 6. それでも Windows 側で使いたい場合のロードマップ
+## 6. ファーム側の現状（Microsoft の「互換キー」要求との差）
 
-トレースで「ファーム起因」と確定した場合、優先度順に次を実装できます。
+| # | 要求 | 実装 | 備考 |
+| --- | --- | --- | --- |
+| 1 | Resident key | ✅ | 5 スロット、`rk: true` を広告 |
+| 2 | Client PIN | ✅ | proto 1 / 2、setPIN / changePIN / getPINToken |
+| 3 | hmac-secret | ✅ | 登録時の拡張 + 取得時の暗号化 salt |
+| 4 | Multiple accounts per RP | ❌ | `authenticatorGetNextAssertion (0x08)` が `0x2A` |
+| — | `credMgmt` | ❌ | `0x0A` 未実装（`設定 > セキュリティ キー > 管理` が使う） |
+| — | Attestation | ❌ | 自己署名 packed。AAGUID はダミー |
 
-1. `authenticatorGetNextAssertion (0x08)` — 1 RP に複数資格情報がある場合の列挙。
-   `getInfo` の `maxCredentialCountInList` を 8 以上に広げるのが望ましい（CTAP2.1 の推奨）。
-2. `authenticatorCredentialManagement (0x0A)` — `getCredsMetadata` / `enumerateRPs` / `enumerateCredentials` / `deleteCredential`。
-   `getInfo` の `options` に `credMgmt: true` を追加。Windows の「セキュリティ キーの管理」が使えるようになります。
-   PIN トークンの permission `cm (0x04)` の受け入れも必要。
-3. `authenticatorLargeBlobs (0x0C)` — `credMgmt` とセットで広告するのが一般的。
-   （32KB のフラッシュに収まるかは要調整。EEPROM 1024 バイトのうち空きは約 80 バイトしかありません）
-4. `options.uv` / `pinUvAuthToken` の組み合わせの再確認、`transports: ["usb"]` の広告。
+このうち 1〜3 は満たしているので、**サイトのパスキー（Misskey / GitHub / Google 等）では動作します**。
+4 と `credMgmt` は今回の症状とは無関係でしたが、Windows の管理 UI を使うなら実装対象です。
 
-1〜2 は「Windows の管理 UI が動く」ところまで到達できますが、
-**3〜4 を足しても MSA の認定要件は満たせません**（5 章）。
-したがって現実的なゴールは、
+### Microsoft アカウントの認定（attestation）の壁
 
-- サイトのパスキー（Chrome / Edge / Misskey など）: **このキーで運用**
-- Windows へのサインイン / Microsoft アカウントのパスキー: **認定キー（YubiKey 等）を使う**
+Microsoft は互換性を **FIDO Alliance MDS** で判断し、有効な attestation statement を要求します
+（[ベンダー向け要件](https://learn.microsoft.com/en-us/entra/identity/authentication/concept-fido2-hardware-vendor)、
+[FIDO2 準拠の要求](https://support.microsoft.com/ja-jp/accounts-billing/work-school/set-up-a-security-key-as-your-verification-method)）。
+AAGUID がダミーで x5c を持たないこのキーは、**MSA のパスキー登録ではサーバー側で拒否され得ます**。
+ファームのバグではなく、ベンダー認定（ルート CA + MDS 登録）が無いことによる制約です。
 
-という住み分けです。
+---
+
+## 7. 次の実装候補
+
+1. `authenticatorGetNextAssertion (0x08)` — 1 RP に複数資格情報がある場合の列挙
+2. `authenticatorCredentialManagement (0x0A)` — `getCredsMetadata` / `enumerateRPs` / `enumerateCredentials` / `deleteCredential`、
+   `getInfo` に `credMgmt: true`、PIN トークンの permission `cm (0x04)`
+3. `authenticatorLargeBlobs (0x0C)` — EEPROM 1024 バイトの空きは約 10 バイトしかなく、フラッシュ側の設計から要検討
+4. 328P のスタック余裕の確認 — `g_ioBuf` 544 + `g_eccHold` 272 + `g_secTmp` 128 + DRBG 72 = 1016 バイトが静的確保で、
+   2048 バイトの SRAM ではスタックに 500 バイト前後しか残りません。ウエッジの引き金がここなら、
+   `Serial` のバッファ削減（`-D SERIAL_RX_BUFFER_SIZE=32`）や `g_secTmp` の縮小が効きます

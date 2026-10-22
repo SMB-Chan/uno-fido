@@ -1,5 +1,6 @@
 ﻿#include <Arduino.h>
 #include <EEPROM.h>
+#include <avr/wdt.h>
 #include "uECC.h"
 #include "compact_sha256.h"
 #include "aes256_tiny.h"
@@ -47,6 +48,11 @@ struct Fido2Slot {
 // dies on power-up; only the 32-byte RP hash is persisted for that session.
 #define PIN_RP_FLAG_ADDR 980
 #define PIN_RP_ADDR 981
+// Diagnostic record, outside every structure above (ends at 1013).
+// A wedged 328P went silent for 53 minutes and only a USB replug recovered it,
+// so the last command is kept here and blinked after a watchdog reset.
+#define LAST_CMD_ADDR 1014
+#define WDT_COUNT_ADDR 1015
 static_assert(offsetof(Fido2Slot, credId) == 67, "credId offset");
 static_assert(offsetof(Fido2Slot, rpIdHash) == 83, "rp offset");
 static_assert(offsetof(Fido2Slot, privKey) == 115, "priv offset");
@@ -77,6 +83,11 @@ extern "C" uint8_t *eccHoldBuf(void) { return g_eccHold; }
 // shared_secret / sign temps. Not the request snapshot and not the workspace.
 uint8_t g_secTmp[128];
 extern "C" uint8_t *eccSecBuf(void) { return g_secTmp; }
+// uECC.c calls this from the point-multiplication loop. The watchdog is 8s and
+// one P-256 multiply takes 20-40s, so it must be fed while that loop advances.
+// uECC_vli_modInv is deliberately NOT fed: an infinite loop there has to trip
+// the watchdog instead of hanging the chip with the USB bridge still alive.
+extern "C" void eccFeed(void) { wdt_reset(); }
 size_t rxIdx = 0;
 bool g_hidMsgReady = false;
 
@@ -271,6 +282,7 @@ static void entropyCollectUntil(unsigned long budgetMs) {
   uint8_t pool[32];
   sha256.reset();
   for (uint16_t i = 0; i < 256; i++) {
+    if ((i & 31) == 0) wdt_reset();
     uint8_t b = (uint8_t)(analogRead(A0 + (i % 6)) ^ TCNT0 ^ (uint8_t)micros());
     sha256.update(&b, 1);
   }
@@ -379,7 +391,10 @@ void initStorage() {
     int n = EEPROM.length();
     for (int i = 0; i < n; i++) {
       EEPROM.update(i, 0x00);
-      if ((i & 63) == 0) digitalWrite(LED_PIN, (i & 64) ? HIGH : LOW);
+      if ((i & 63) == 0) {
+        wdt_reset();
+        digitalWrite(LED_PIN, (i & 64) ? HIGH : LOW);
+      }
     }
     digitalWrite(LED_PIN, LOW);
     EEPROM.update(0, MAGIC_0);
@@ -494,6 +509,7 @@ int checkAnyButtonPinLow() {
 static void holdBinaryPresence(void) {
   unsigned long start = millis();
   while ((unsigned long)(millis() - start) < 1500) {
+    wdt_reset();
     digitalWrite(LED_PIN, ((millis() / 100) & 1) ? HIGH : LOW);
   }
   digitalWrite(LED_PIN, HIGH);
@@ -515,6 +531,7 @@ bool waitForUserPresence(bool binaryMode = false) {
   while (Serial.available()) Serial.read();
 
   while (millis() - start < timeoutMs) {
+    wdt_reset();
     if (millis() - lastBlink > 80) {
       ledState = !ledState;
       digitalWrite(LED_PIN, ledState ? HIGH : LOW);
@@ -721,15 +738,53 @@ void handleBinaryHidPacket(const uint8_t *pkt) {
   }
 }
 
-// loop() is inlined into main otherwise, so its 64-byte HID frame stays
+// After a watchdog reset the last CTAP command is blinked on the L LED:
+// one 120ms flash per command byte, twice, with a 750ms gap (~10s total).
+// 0x04 (GetInfo) blinking means the wedge was not command specific;
+// 0x01 / 0x06 blinking points at makeCredential / clientPIN.
+// The 16U2 waits up to 90s for the ready beacon, which covers this plus the
+// boot keygen (one P-256 multiply).
+static void reportLastCommand(uint8_t resetFlags) {
+  if (!(resetFlags & (1 << WDRF))) return;
+  uint8_t n = EEPROM.read(LAST_CMD_ADDR);
+  if (n > 12) n = 12;
+  for (uint8_t round = 0; round < 2; round++) {
+    for (uint8_t i = 0; i < n; i++) {
+      wdt_reset();
+      digitalWrite(LED_PIN, HIGH); delay(120);
+      wdt_reset();
+      digitalWrite(LED_PIN, LOW); delay(200);
+    }
+    for (uint8_t i = 0; i < 3; i++) { wdt_reset(); delay(250); }
+  }
+}
+
+// setup() is inlined into main otherwise, so its 64-byte HID frame stays
 // on the stack through boot keygen and SHA256 overwrites its own state.
 __attribute__((noinline))
 void setup() {
+  // The bootloader leaves the watchdog off. Read why we restarted before
+  // clearing the flag: a WDRF here means a previous run was wedged.
+  uint8_t resetFlags = MCUSR;
+  MCUSR = 0;
+  wdt_disable();
+
   pinMode(LED_PIN, OUTPUT);
   for (int i = 0; i < NUM_BUTTON_PINS; i++) {
     pinMode(BUTTON_PINS[i], INPUT_PULLUP);
   }
   digitalWrite(LED_PIN, LOW);
+
+  if (resetFlags & (1 << WDRF)) {
+    uint8_t c = EEPROM.read(WDT_COUNT_ADDR);
+    if (c < 255) EEPROM.update(WDT_COUNT_ADDR, (uint8_t)(c + 1));
+  }
+  reportLastCommand(resetFlags);
+
+  // Arm it after the blink report so a reboot loop still shows the pattern.
+  // Every long path (boot keygen, EEPROM wipe, UP wait) feeds it explicitly.
+  wdt_enable(WDTO_8S);
+  wdt_reset();
 
   Serial.begin(115200);
   while (!Serial) { ; }
@@ -814,6 +869,7 @@ static bool takeHidFrame(void) {
 
 __attribute__((noinline))
 void loop() {
+  wdt_reset();
   // Ready beacon. The 16U2 does not forward a host request until it sees 0xA6,
   // so a multi-frame CTAP message cannot arrive during initStorage.
   if (g_beacon && !Serial.available() &&

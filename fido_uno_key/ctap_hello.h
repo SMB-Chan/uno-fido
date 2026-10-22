@@ -1289,6 +1289,9 @@ size_t executeCtap2InPlace(size_t reqLen, bool binaryMode) {
   if (reqLen > CTAP_MAX_MSG) return ctapErr(0x39);
   g_msgLen = (uint16_t)reqLen;
   uint8_t cmd = g_ioBuf[0];
+  // Survives a watchdog reset: reportLastCommand() blinks this byte on boot,
+  // so a wedge tells us which command was in flight (see docs/windows-hello.md).
+  EEPROM.update(LAST_CMD_ADDR, cmd);
   if (cmd == 0x04) return buildCtap2GetInfo(g_ioBuf);
   if (cmd == 0x07) return ctapReset(binaryMode);
   if (cmd == 0x0B) return ctapSelection(binaryMode);

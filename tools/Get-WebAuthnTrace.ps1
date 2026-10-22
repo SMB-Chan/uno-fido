@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Windows Hello / セキュリティキーのセットアップが失敗する原因を切り分けるための診断スクリプト。
 
@@ -32,6 +32,15 @@
 
 .PARAMETER EnableLog
   Operational ログが無効なら有効化する（要 管理者）。
+
+.NOTES
+  このファイルは UTF-8 (BOM 付き) で保存されています。BOM を落とすと
+  Windows PowerShell 5.1 が Shift-JIS として読み、日本語リテラルで
+  "Unterminated string literal" になります（.gitattributes で -text 指定）。
+  BOM が消えた場合は次のように付け直せます。
+
+    $p = '.\tools\Get-WebAuthnTrace.ps1'
+    [IO.File]::WriteAllText($p, [IO.File]::ReadAllText($p), (New-Object Text.UTF8Encoding $true))
 
 .EXAMPLE
   # 管理者の PowerShell で
