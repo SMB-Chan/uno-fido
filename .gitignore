@@ -1,0 +1,6 @@
+# Arduino CLI build output
+fido_uno_key/build/
+
+# Linked binaries and downloaded tools
+*.elf
+*.exe

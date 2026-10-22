@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Elegoo Uno R3 FIDO2 (CTAP2) & U2F セキュリティキー実験ラボ</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --primary-hover: #0ea5e9;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --purple: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 1.5rem 2rem;
+    }
+    .container { max-width: 960px; margin: 0 auto; }
+    header {
+      margin-bottom: 1.25rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.85rem;
+    }
+    h1 { font-size: 1.65rem; color: var(--primary); display: flex; align-items: center; gap: 0.5rem; }
+    p.subtitle { color: var(--text-muted); margin-top: 0.25rem; font-size: 0.92rem; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-bottom: 1.25rem; }
+    @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.25rem;
+      margin-bottom: 1.25rem;
+    }
+    .grid .card { margin-bottom: 0; }
+    .card h2 { font-size: 1.15rem; margin-bottom: 0.85rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 0.6rem 1.1rem;
+      font-size: 0.92rem;
+      font-weight: 600;
+      border-radius: 0.5rem;
+      border: none;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-primary { background: var(--primary); color: #0f172a; }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-success { background: var(--success); color: #0f172a; }
+    .btn-warning { background: var(--warning); color: #0f172a; }
+    .btn-purple { background: var(--purple); color: #fff; }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-touch {
+      background: #fde047;
+      color: #0f172a;
+      margin-top: 0.65rem;
+      width: 100%;
+      padding: 0.6rem;
+      font-weight: 700;
+      box-shadow: 0 0 12px rgba(253, 224, 71, 0.4);
+    }
+    .btn-touch:hover { background: #facc15; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.6rem;
+      border-radius: 9999px;
+      font-size: 0.78rem;
+      font-weight: bold;
+    }
+    .badge-disconnected { background: #334155; color: #94a3b8; }
+    .badge-connecting { background: #854d0e; color: #fde047; }
+    .badge-connected { background: #166534; color: #4ade80; }
+    .badge-fido2 { background: #581c87; color: #e9d5ff; }
+    @keyframes pulse { from { opacity: 0.6; } to { opacity: 1; } }
+    .status-panel {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.25rem;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    .info-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.35rem 0;
+      border-bottom: 1px dashed #334155;
+      font-size: 0.85rem;
+    }
+    .info-label { color: var(--text-muted); }
+    .info-val { font-family: monospace; font-weight: bold; }
+    .alert {
+      padding: 0.8rem;
+      border-radius: 0.5rem;
+      margin-top: 0.85rem;
+      font-size: 0.88rem;
+      display: none;
+    }
+    .alert-waiting { background: #451a03; border: 1px solid #b45309; color: #fde047; display: block; }
+    .alert-processing { background: #172554; border: 1px solid #3b82f6; color: #93c5fd; display: block; animation: pulse 0.8s infinite alternate; }
+    .alert-success { background: #052e16; border: 1px solid #15803d; color: #86efac; display: block; }
+    .alert-error { background: #450a0a; border: 1px solid #b91c1c; color: #fca5a5; display: block; }
+    .terminal {
+      background: #020617;
+      border: 1px solid #1e293b;
+      border-radius: 0.5rem;
+      padding: 0.85rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.82rem;
+      height: 210px;
+      overflow-y: auto;
+      color: #38bdf8;
+    }
+    .terminal-line { margin-bottom: 0.25rem; word-break: break-all; }
+    .terminal-time { color: #64748b; margin-right: 0.5rem; }
+    .terminal-in { color: #4ade80; }
+    .terminal-out { color: #f59e0b; }
+    .terminal-err { color: #f87171; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🛡️ Elegoo Uno R3 FIDO2 (CTAP2 CBOR) & USB HID 実験ラボ</h1>
+      <p class="subtitle">ATmega16U2 ネイティブ USB HID (0xF1D0) ＋ ATmega328P FIDO2 パスキーエンジン</p>
+    </header>
+
+    <!-- Windows ネイティブ USB HID WebAuthn セクション -->
+    <div class="card" style="border: 2px solid #38bdf8; background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);">
+      <h2>
+        <span>🌐 Windows 標準 WebAuthn API テスト (ATmega16U2 USB HID モード)</span>
+        <span class="badge" style="background:#0284c7; color:#fff;">Native USB HID (0xF1D0)</span>
+      </h2>
+      <p style="color: #cbd5e1; font-size: 0.88rem; margin-bottom: 1rem;">
+        ATmega16U2 を USB HID 化した後は、COMポート接続不要で <strong>Windows OS 標準のセキュリティキー画面（<code>navigator.credentials</code>）</strong> から直接 Elegoo Uno R3 を FIDO2 キーとして使用できます！（※要求が来ると Uno R3 の LED が 2.5秒間点滅したあと自動タッチ承認して約5〜9秒で計算完了します）
+      </p>
+      <div class="grid" style="margin-bottom: 0.5rem;">
+        <button class="btn btn-primary" onclick="runNativeWebAuthnRegister(false)" style="width:100%;">
+          🛡️ Windows 標準 WebAuthn で新規登録 (create)
+        </button>
+        <button class="btn btn-success" onclick="runNativeWebAuthnLogin(false)" style="width:100%;">
+          🚀 Windows 標準 WebAuthn でログイン (get)
+        </button>
+      </div>
+      <div class="grid" style="margin-bottom: 0.5rem;">
+        <button class="btn btn-purple" onclick="runNativeWebAuthnRegister(true)" style="width:100%;">
+          🔑 Windows Hello フルパスキー登録 (rk:required / uv:required)
+        </button>
+        <button class="btn btn-purple" onclick="runNativeWebAuthnLogin(true)" style="width:100%; background:#0ea5e9;">
+          ✨ Windows Hello パスキー・ユーザー名なしログイン (allowCredentialsなし)
+        </button>
+      </div>
+      <div id="nativeAlert" class="alert"></div>
+    </div>
+
+    <div class="status-panel card">
+      <div>
+        <span style="font-weight: 600; margin-right: 0.5rem;">接続ステータス:</span>
+        <span id="connBadge" class="badge badge-disconnected">未接続</span>
+      </div>
+      <div style="display: flex; gap: 0.5rem;">
+        <button id="btnCtap2Info" class="btn btn-purple" onclick="runCtap2GetInfo()" disabled>🔍 CTAP2 GetInfo (0x04)</button>
+        <button id="btnConnect" class="btn btn-primary" onclick="toggleConnect()">🔌 Uno R3 (COMポート) に接続</button>
+        <button id="btnReset" class="btn btn-danger" onclick="resetKeyStorage()" disabled>🗑️ 鍵リセット</button>
+      </div>
+    </div>
+
+    <!-- FIDO2 (CTAP2) セクション -->
+    <div class="grid">
+      <div class="card" style="border-color: #7e22ce;">
+        <h2>
+          <span>🚀 FIDO2 パスキー登録 (MakeCredential)</span>
+          <span class="badge badge-fido2">CTAP2 CBOR (0x01)</span>
+        </h2>
+        <p style="color: var(--text-muted); font-size: 0.86rem; margin-bottom: 0.85rem;">
+          CBOR エンコードされたリクエストを送信し、77バイト <code>COSE_Key</code> を含む 148バイト <code>authData</code> と <code>packed</code> 署名を検証します。
+        </p>
+        <button id="btnCtap2Reg" class="btn btn-purple" onclick="runCtap2MakeCredential()" disabled style="width: 100%;">
+          ✨ FIDO2 MakeCredential (パスキー生成)
+        </button>
+        <div id="ctap2RegAlert" class="alert"></div>
+
+        <div style="margin-top: 0.85rem;">
+          <div class="info-item">
+            <span class="info-label">AAGUID:</span>
+            <span id="fido2Aaguid" class="info-val">--</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Credential ID (16B):</span>
+            <span id="fido2CredId" class="info-val">未登録</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">COSE_Key (EC2 ES256):</span>
+            <span id="fido2CoseKey" class="info-val" style="font-size: 0.75rem;">None</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="border-color: #7e22ce;">
+        <h2>
+          <span>🔐 FIDO2 パスキー認証 (GetAssertion)</span>
+          <span class="badge badge-fido2">CTAP2 CBOR (0x02)</span>
+        </h2>
+        <p style="color: var(--text-muted); font-size: 0.86rem; margin-bottom: 0.85rem;">
+          <strong>Key Handle を送らず RP ID のみで EEPROM から秘密鍵を自動検索（Discoverable Credential / Passkey）</strong>して署名・検証します！
+        </p>
+        <button id="btnCtap2Auth" class="btn btn-warning" onclick="runCtap2GetAssertion()" disabled style="width: 100%;">
+          ⚡ FIDO2 GetAssertion (パスキーログイン)
+        </button>
+        <div id="ctap2AuthAlert" class="alert"></div>
+
+        <div style="margin-top: 0.85rem;">
+          <div class="info-item">
+            <span class="info-label">自動検出 Credential ID:</span>
+            <span id="fido2FoundCred" class="info-val">--</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Flags / SignCount:</span>
+            <span id="fido2SignCount" class="info-val">--</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">COSE 署名検証:</span>
+            <span id="fido2VerifyStatus" class="info-val">--</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ターミナル / シリアルログ -->
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+        <h2 style="border: none; margin: 0; padding: 0;">📡 シリアル通信 & CTAP2 CBOR ログ (115200 bps)</h2>
+        <button class="btn" style="background:#334155; padding: 0.3rem 0.6rem; font-size: 0.8rem; color:#fff;" onclick="clearLog()">クリア</button>
+      </div>
+      <div id="terminal" class="terminal"></div>
+    </div>
+  </div>
+
+  <script>
+    let port = null;
+    let reader = null;
+    let keepReading = false;
+    let rxBuffer = "";
+    let statusListeners = [];
+    let isBoardReady = false;
+
+    let fido2CryptoKey = null;
+    let lastNativeCredId = null;
+    const RP_ID = "elegoo-fido.local";
+
+    // Native Browser WebAuthn API (navigator.credentials.create / get) for USB HID mode!
+    async function runNativeWebAuthnRegister(isPasskey = false) {
+      const alertBox = document.getElementById("nativeAlert");
+      alertBox.className = "alert alert-waiting";
+      alertBox.innerHTML = isPasskey
+        ? "⏳ Windows Hello フルパスキー登録 (rk:required / uv:required) 起動中... 「セキュリティ キー」を選択してください！（1.2秒点滅後に自動承認・約10秒で完了）"
+        : "⏳ Windows Hello / WebAuthn ダイアログを起動中... 「セキュリティ キー」を選択してください！（1.2秒点滅後に自動承認・約10秒で完了）";
+      try {
+        const challenge = crypto.getRandomValues(new Uint8Array(32));
+        const userId = crypto.getRandomValues(new Uint8Array(16));
+        const authSel = isPasskey
+          ? {
+              authenticatorAttachment: "cross-platform",
+              residentKey: "required",
+              requireResidentKey: true,
+              userVerification: "required"
+            }
+          : {
+              authenticatorAttachment: "cross-platform",
+              userVerification: "discouraged"
+            };
+        const cred = await navigator.credentials.create({
+          publicKey: {
+            challenge,
+            rp: { name: "Elegoo Uno R3 FIDO2 Lab", id: location.hostname },
+            user: { id: userId, name: "uno-passkey@example.com", displayName: "Elegoo Uno R3 Passkey User" },
+            pubKeyCredParams: [{ type: "public-key", alg: -7 }], // ES256 (P-256)
+            authenticatorSelection: authSel,
+            timeout: 60000,
+            attestation: "direct"
+          }
+        });
+        lastNativeCredId = new Uint8Array(cred.rawId);
+        const credHex = bufToHex(lastNativeCredId).toUpperCase();
+        alertBox.className = "alert alert-success";
+        alertBox.innerHTML = isPasskey
+          ? `🎉 <strong>Windows Hello フルパスキー (Resident Key + UV) 登録成功!!</strong><br>Credential ID: <code>${credHex}</code>`
+          : `🎉 <strong>Windows ネイティブ USB HID 登録成功!!</strong><br>Credential ID: <code>${credHex}</code>`;
+        log(`[Native USB HID] ${isPasskey ? "Windows Hello フルパスキー" : "WebAuthn"} create() 成功! CredID: ${credHex}`);
+      } catch (err) {
+        alertBox.className = "alert alert-error";
+        alertBox.textContent = `ネイティブ WebAuthn 登録エラー: ${err.message}`;
+        log(`[Native USB HID] エラー: ${err.message}`, "err");
+      }
+    }
+
+    async function runNativeWebAuthnLogin(isPasskey = false) {
+      const alertBox = document.getElementById("nativeAlert");
+      alertBox.className = "alert alert-waiting";
+      alertBox.innerHTML = isPasskey
+        ? "⏳ Windows Hello パスキー（ID指定なし・EEPROM自動検索 + UV=required）ログイン要求中...（1.2秒点滅後に自動承認・約5.5秒で完了）"
+        : "⏳ Windows WebAuthn ログイン要求中...（1.2秒点滅後に自動承認・約5.5秒で完了）";
+      try {
+        const challenge = crypto.getRandomValues(new Uint8Array(32));
+        const opts = {
+          challenge,
+          rpId: location.hostname,
+          userVerification: isPasskey ? "required" : "discouraged",
+          timeout: 60000
+        };
+        if (!isPasskey && lastNativeCredId) {
+          opts.allowCredentials = [{ type: "public-key", id: lastNativeCredId, transports: ["usb"] }];
+        }
+        const assertion = await navigator.credentials.get({ publicKey: opts });
+        const credHex = bufToHex(new Uint8Array(assertion.rawId)).toUpperCase();
+        const authData = new Uint8Array(assertion.response.authenticatorData);
+        const flags = authData[32];
+        const uvSet = (flags & 0x04) !== 0;
+        const sigHex = bufToHex(new Uint8Array(assertion.response.signature)).toUpperCase();
+        alertBox.className = "alert alert-success";
+        alertBox.innerHTML = `🌟 <strong>${isPasskey ? "Windows Hello パスキー（ID指定なし）" : "Windows ネイティブ USB HID"} ログイン成功!!</strong><br>Credential ID: <code>${credHex}</code> / Flags: <code>0x${flags.toString(16).padStart(2, '0')} (UP=1, UV=${uvSet ? 1 : 0})</code><br>Signature: <code>${sigHex.substr(0, 40)}...</code>`;
+        log(`[Native USB HID] ${isPasskey ? "Windows Hello Passkey (Discoverable)" : "WebAuthn"} get() ログイン成功! CredID: ${credHex}, Flags: 0x${flags.toString(16).padStart(2, '0')} (UV=${uvSet})`);
+      } catch (err) {
+        alertBox.className = "alert alert-error";
+        alertBox.textContent = `ネイティブ WebAuthn ログインエラー: ${err.message}`;
+        log(`[Native USB HID] エラー: ${err.message}`, "err");
+      }
+    }
+
+    function log(msg, type = "normal") {
+      const term = document.getElementById("terminal");
+      const line = document.createElement("div");
+      line.className = "terminal-line";
+      const now = new Date().toTimeString().split(" ")[0];
+      const timeSpan = `<span class="terminal-time">[${now}]</span>`;
+      
+      if (type === "in") line.innerHTML = `${timeSpan}<span class="terminal-in">⬅️ ${escapeHtml(msg)}</span>`;
+      else if (type === "out") line.innerHTML = `${timeSpan}<span class="terminal-out">➡️ ${escapeHtml(msg)}</span>`;
+      else if (type === "err") line.innerHTML = `${timeSpan}<span class="terminal-err">❌ ${escapeHtml(msg)}</span>`;
+      else line.innerHTML = `${timeSpan}<span>ℹ️ ${escapeHtml(msg)}</span>`;
+
+      term.appendChild(line);
+      term.scrollTop = term.scrollHeight;
+    }
+
+    function clearLog() {
+      document.getElementById("terminal").innerHTML = "";
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    function bufToHex(buf) {
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function hexToBuf(hex) {
+      const bytes = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+      }
+      return bytes;
+    }
+
+    async function safeDisconnect() {
+      keepReading = false;
+      isBoardReady = false;
+      statusListeners = [];
+      try {
+        if (reader) {
+          await reader.cancel();
+          reader.releaseLock();
+          reader = null;
+        }
+      } catch (e) {}
+      try {
+        if (port) await port.close();
+      } catch (e) {}
+      port = null;
+      updateUIConnected("disconnected");
+    }
+
+    window.addEventListener("beforeunload", () => {
+      if (port) safeDisconnect();
+    });
+
+    async function toggleConnect() {
+      if (port) {
+        await safeDisconnect();
+        log("COMポートから切断しました");
+        return;
+      }
+
+      try {
+        port = await navigator.serial.requestPort();
+        if (port.readable || port.writable) {
+          try { await port.close(); } catch (e) {}
+        }
+        await port.open({ baudRate: 115200 });
+
+        try {
+          await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+          await new Promise(r => setTimeout(r, 100));
+          await port.setSignals({ dataTerminalReady: true, requestToSend: true });
+        } catch (e) {}
+
+        keepReading = true;
+        rxBuffer = "";
+        updateUIConnected("connecting");
+        log("COMポートを開きました。Uno R3 (FIDO2) の起動を待っています...");
+
+        readLoop();
+
+        for (let attempt = 1; attempt <= 4; attempt++) {
+          await new Promise(r => setTimeout(r, 1200));
+          if (isBoardReady || !port) break;
+          await sendLine("INFO");
+        }
+      } catch (err) {
+        log(`接続エラー: ${err.message}`, "err");
+        await safeDisconnect();
+      }
+    }
+
+    function updateUIConnected(state) {
+      const badge = document.getElementById("connBadge");
+      const btn = document.getElementById("btnConnect");
+      const btnInfo = document.getElementById("btnCtap2Info");
+      const btnReg = document.getElementById("btnCtap2Reg");
+      const btnAuth = document.getElementById("btnCtap2Auth");
+      const btnReset = document.getElementById("btnReset");
+
+      if (state === "connected") {
+        badge.className = "badge badge-connected";
+        badge.textContent = "✅ 通信確立 (FIDO_2_0 / CTAP2)";
+        btn.textContent = "🔌 切断";
+        btn.className = "btn btn-danger";
+        btnInfo.disabled = false;
+        btnReg.disabled = false;
+        btnAuth.disabled = false;
+        btnReset.disabled = false;
+      } else if (state === "connecting") {
+        badge.className = "badge badge-connecting";
+        badge.textContent = "⏳ 起動待ち...";
+        btn.textContent = "🔌 切断";
+        btn.className = "btn btn-danger";
+      } else {
+        badge.className = "badge badge-disconnected";
+        badge.textContent = "未接続";
+        btn.textContent = "🔌 Uno R3 (COMポート) に接続";
+        btn.className = "btn btn-primary";
+        btnInfo.disabled = true;
+        btnReg.disabled = true;
+        btnAuth.disabled = true;
+        btnReset.disabled = true;
+      }
+    }
+
+    async function sendLine(line) {
+      if (!port || !port.writable) return;
+      log(line, "out");
+      const encoder = new TextEncoder();
+      const data = encoder.encode(line + "\n");
+      const writer = port.writable.getWriter();
+      try {
+        const chunkSize = 32;
+        for (let i = 0; i < data.length; i += chunkSize) {
+          const chunk = data.slice(i, i + chunkSize);
+          await writer.write(chunk);
+          if (i + chunkSize < data.length) {
+            await new Promise(r => setTimeout(r, 6));
+          }
+        }
+      } finally {
+        writer.releaseLock();
+      }
+    }
+
+    async function sendVirtualTouch() {
+      if (!port || !port.writable) return;
+      log("T (仮想タッチ承認送信)", "out");
+      const encoder = new TextEncoder();
+      const writer = port.writable.getWriter();
+      try {
+        await writer.write(encoder.encode("T"));
+      } finally {
+        writer.releaseLock();
+      }
+    }
+
+    async function readLoop() {
+      const decoder = new TextDecoder();
+      reader = port.readable.getReader();
+      try {
+        while (keepReading) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value) {
+            rxBuffer += decoder.decode(value, { stream: true });
+            let lines = rxBuffer.split(/\r?\n/);
+            rxBuffer = lines.pop();
+            for (const line of lines) {
+              if (line.trim().length > 0) handleSerialLine(line.trim());
+            }
+          }
+        }
+      } catch (err) {
+        if (keepReading) log(`受信エラー: ${err.message}`, "err");
+      } finally {
+        try { if (reader) { reader.releaseLock(); reader = null; } } catch (e) {}
+      }
+    }
+
+    function handleSerialLine(line) {
+      log(line, "in");
+      let obj = null;
+      try { obj = JSON.parse(line); } catch (e) { return; }
+
+      if (!isBoardReady && (obj.event === "BOOT" || obj.version === "FIDO_2_0" || obj.status === "OK")) {
+        isBoardReady = true;
+        updateUIConnected("connected");
+      }
+
+      if (obj.status && statusListeners.length > 0) {
+        statusListeners[0](obj);
+      }
+    }
+
+    function runCommandLifecycle(onWaiting, onProcessing, timeoutMs = 35000) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          statusListeners = [];
+          reject(new Error("タイムアウト"));
+        }, timeoutMs);
+
+        statusListeners = [(obj) => {
+          if (obj.status === "WAITING_USER_PRESENCE") {
+            if (onWaiting) onWaiting(obj);
+          } else if (obj.status === "PROCESSING") {
+            if (onProcessing) onProcessing(obj);
+          } else {
+            clearTimeout(timer);
+            statusListeners = [];
+            resolve(obj);
+          }
+        }];
+      });
+    }
+
+    async function sha256(data) {
+      const hash = await crypto.subtle.digest("SHA-256", data);
+      return new Uint8Array(hash);
+    }
+
+    function derToP1363(der) {
+      let offset = 2;
+      if (der[0] !== 0x30) throw new Error("Invalid DER sequence");
+      if (der[offset++] !== 0x02) throw new Error("Invalid DER integer r");
+      let rLen = der[offset++];
+      let r = der.slice(offset, offset + rLen);
+      offset += rLen;
+      if (der[offset++] !== 0x02) throw new Error("Invalid DER integer s");
+      let sLen = der[offset++];
+      let s = der.slice(offset, offset + sLen);
+      if (r.length === 33 && r[0] === 0x00) r = r.slice(1);
+      if (s.length === 33 && s[0] === 0x00) s = s.slice(1);
+      const out = new Uint8Array(64);
+      out.set(r, 32 - r.length);
+      out.set(s, 64 - s.length);
+      return out;
+    }
+
+    // Build CTAP2 authenticatorMakeCredential (0x01) CBOR Request
+    function buildMakeCredCbor(clientDataHash32, rpIdStr) {
+      const rpBytes = new TextEncoder().encode(rpIdStr);
+      const out = [];
+      out.push(0x01); // Command 0x01: authenticatorMakeCredential
+      out.push(0xA2); // CBOR map(2)
+      // Key 1: clientDataHash (bstr 32)
+      out.push(0x01, 0x58, 0x20, ...clientDataHash32);
+      // Key 2: rp {"id": rpIdStr}
+      out.push(0x02, 0xA1, 0x62, 0x69, 0x64, 0x60 | rpBytes.length, ...rpBytes);
+      return new Uint8Array(out);
+    }
+
+    // Build CTAP2 authenticatorGetAssertion (0x02) CBOR Request (Discoverable Credential - no allowList!)
+    function buildGetAssertionCbor(clientDataHash32, rpIdStr) {
+      const rpBytes = new TextEncoder().encode(rpIdStr);
+      const out = [];
+      out.push(0x02); // Command 0x02: authenticatorGetAssertion
+      out.push(0xA2); // CBOR map(2)
+      // Key 1: rpId (tstr)
+      out.push(0x01, 0x60 | rpBytes.length, ...rpBytes);
+      // Key 2: clientDataHash (bstr 32)
+      out.push(0x02, 0x58, 0x20, ...clientDataHash32);
+      return new Uint8Array(out);
+    }
+
+    // 0. CTAP2 authenticatorGetInfo (0x04)
+    async function runCtap2GetInfo() {
+      const p = runCommandLifecycle(null, null, 5000);
+      await sendLine("CTAP2 04");
+      const resp = await p;
+      if (resp.status === "OK") {
+        const bytes = hexToBuf(resp.cbor);
+        // Key 3 is a 16-byte bstr (03 50). Extensions sit in front of it.
+        let aaguidOff = -1;
+        for (let i = 0; i + 18 <= bytes.length; i++) {
+          if (bytes[i] === 0x03 && bytes[i + 1] === 0x50) { aaguidOff = i + 2; break; }
+        }
+        const aaguidStr = aaguidOff < 0 ? "" : new TextDecoder().decode(bytes.slice(aaguidOff, aaguidOff + 16));
+        document.getElementById("fido2Aaguid").textContent = aaguidStr;
+        log(`CTAP2 GetInfo 成功! Versions: ["FIDO_2_0", "U2F_V2"], AAGUID: "${aaguidStr}", Options: {rk:true, up:true}`);
+      }
+    }
+
+    // 1. CTAP2 authenticatorMakeCredential (0x01)
+    async function runCtap2MakeCredential() {
+      const alertBox = document.getElementById("ctap2RegAlert");
+      alertBox.className = "alert alert-waiting";
+      alertBox.innerHTML = "⏳ CTAP2 MakeCredential CBOR を送信中...";
+
+      try {
+        const clientDataHash = crypto.getRandomValues(new Uint8Array(32));
+        const cborReq = buildMakeCredCbor(clientDataHash, RP_ID);
+
+        const lifecyclePromise = runCommandLifecycle(
+          () => {
+            alertBox.className = "alert alert-waiting";
+            alertBox.innerHTML = `
+              <div>⏳ <strong>[CTAP2] Uno R3 の LED が点滅中！</strong><br>下のボタンでタッチ承認してください。</div>
+              <button class="btn btn-touch" onclick="sendVirtualTouch()">👆 ここをクリックしてタッチ承認</button>
+            `;
+          },
+          (proc) => {
+            alertBox.className = "alert alert-processing";
+            alertBox.innerHTML = `⚡ <strong>承認検知 (${proc.trigger})！</strong><br>FIDO2 パスキー鍵ペア & COSE_Key 構造体 & Attestation 署名を計算中（約9秒）...`;
+          },
+          35000
+        );
+
+        await sendLine(`CTAP2 ${bufToHex(cborReq)}`);
+        const resp = await lifecyclePromise;
+
+        if (resp.status !== "OK") throw new Error(`CTAP2 エラー: ${JSON.stringify(resp)}`);
+
+        const cbor = hexToBuf(resp.cbor);
+        // Layout of MakeCredential CBOR response from Uno R3:
+        // [0]: 0x00 (CTAP2_OK)
+        // [13..160]: 148-byte authData
+        //   authData[0..31]: rpIdHash (32B)
+        //   authData[32]: flags (0x45 = UP|UV|AT)
+        //   authData[33..36]: signCount (4B)
+        //   authData[37..52]: AAGUID (16B)
+        //   authData[53..54]: credIdLen (0x0010 = 16)
+        //   authData[55..70]: credId (16B)
+        //   authData[71..147]: COSE_Key (77B)
+        //     COSE_Key[10..41]: X (32B)
+        //     COSE_Key[45..76]: Y (32B)
+        const authData = cbor.slice(13, 13 + 148);
+        const aaguidStr = new TextDecoder().decode(authData.slice(37, 53));
+        const credId = authData.slice(55, 71);
+        const coseKey = authData.slice(71, 148);
+        const pubX = coseKey.slice(10, 42);
+        const pubY = coseKey.slice(45, 77);
+
+        // Extract DER signature at end of CBOR
+        const sigLen = cbor[173];
+        const derSig = cbor.slice(174, 174 + sigLen);
+
+        // Reconstruct uncompressed P-256 key (0x04 || X || Y) for Web Crypto API
+        const rawPub = new Uint8Array(65);
+        rawPub[0] = 0x04;
+        rawPub.set(pubX, 1);
+        rawPub.set(pubY, 33);
+
+        fido2CryptoKey = await crypto.subtle.importKey(
+          "raw",
+          rawPub,
+          { name: "ECDSA", namedCurve: "P-256" },
+          true,
+          ["verify"]
+        );
+
+        // Verify FIDO2 Packed Attestation signature over (authData || clientDataHash)
+        const signedBytes = new Uint8Array(148 + 32);
+        signedBytes.set(authData, 0);
+        signedBytes.set(clientDataHash, 148);
+
+        const isValid = await crypto.subtle.verify(
+          { name: "ECDSA", hash: { name: "SHA-256" } },
+          fido2CryptoKey,
+          derToP1363(derSig),
+          signedBytes
+        );
+
+        if (!isValid) throw new Error("CTAP2 Packed Attestation 署名検証に失敗しました");
+
+        document.getElementById("fido2Aaguid").textContent = aaguidStr;
+        document.getElementById("fido2CredId").textContent = bufToHex(credId).toUpperCase();
+        document.getElementById("fido2CoseKey").textContent = bufToHex(coseKey).substr(0, 34) + "... (77B)";
+
+        alertBox.className = "alert alert-success";
+        alertBox.innerHTML = `🎉 <strong>FIDO2 パスキー登録成功!</strong><br>148B <code>authData</code> 内の <code>COSE_Key</code> デコードと Packed Attestation 署名検証に完全成功しました！`;
+        log(`FIDO2 MakeCredential 成功! CredID: ${bufToHex(credId).toUpperCase()}`);
+      } catch (err) {
+        alertBox.className = "alert alert-error";
+        alertBox.textContent = `失敗: ${err.message}`;
+        log(`FIDO2 MakeCredential 失敗: ${err.message}`, "err");
+      }
+    }
+
+    // 2. CTAP2 authenticatorGetAssertion (0x02) - Discoverable Credential (Passkey)
+    async function runCtap2GetAssertion() {
+      if (!fido2CryptoKey) {
+        alert("先に FIDO2 MakeCredential（パスキー生成）を実行してください");
+        return;
+      }
+
+      const alertBox = document.getElementById("ctap2AuthAlert");
+      alertBox.className = "alert alert-waiting";
+      alertBox.innerHTML = "⏳ CTAP2 GetAssertion (Passkey) CBOR を送信中...";
+
+      try {
+        const clientDataHash = crypto.getRandomValues(new Uint8Array(32));
+        const cborReq = buildGetAssertionCbor(clientDataHash, RP_ID);
+
+        const lifecyclePromise = runCommandLifecycle(
+          () => {
+            alertBox.className = "alert alert-waiting";
+            alertBox.innerHTML = `
+              <div>⏳ <strong>[CTAP2 Passkey] Uno R3 の LED が点滅中！</strong><br>下のボタンでタッチ承認してください。</div>
+              <button class="btn btn-touch" onclick="sendVirtualTouch()">👆 ここをクリックしてタッチ承認</button>
+            `;
+          },
+          (proc) => {
+            alertBox.className = "alert alert-processing";
+            alertBox.innerHTML = `⚡ <strong>承認検知 (${proc.trigger})！</strong><br>EEPROM からパスキーを検索し CTAP2 Assertion 署名を計算中（約4.5秒）...`;
+          },
+          30000
+        );
+
+        await sendLine(`CTAP2 ${bufToHex(cborReq)}`);
+        const resp = await lifecyclePromise;
+
+        if (resp.status !== "OK") throw new Error(`CTAP2 エラー: ${JSON.stringify(resp)}`);
+
+        const cbor = hexToBuf(resp.cbor);
+        // Layout of GetAssertion CBOR response:
+        // [0]: 0x00 (CTAP2_OK)
+        // [8..23]: credId (16B)
+        // [43..79]: authData (37B)
+        // [82..]: derSig
+        const foundCredId = cbor.slice(8, 24);
+        const authData = cbor.slice(43, 80);
+        const flags = authData[32];
+        const signCount = (authData[33] << 24) | (authData[34] << 16) | (authData[35] << 8) | authData[36];
+        const sigLen = cbor[82];
+        const derSig = cbor.slice(83, 83 + sigLen);
+
+        const signedBytes = new Uint8Array(37 + 32);
+        signedBytes.set(authData, 0);
+        signedBytes.set(clientDataHash, 37);
+
+        const isValid = await crypto.subtle.verify(
+          { name: "ECDSA", hash: { name: "SHA-256" } },
+          fido2CryptoKey,
+          derToP1363(derSig),
+          signedBytes
+        );
+
+        if (!isValid) throw new Error("CTAP2 Assertion 署名検証に失敗しました");
+
+        document.getElementById("fido2FoundCred").textContent = bufToHex(foundCredId).toUpperCase();
+        document.getElementById("fido2SignCount").textContent = `Flags: 0x0${flags.toString(16)} (UP|UV) / Count: ${signCount}`;
+        document.getElementById("fido2VerifyStatus").textContent = "✅ 真正 (VALID CTAP2 ES256)";
+
+        alertBox.className = "alert alert-success";
+        alertBox.innerHTML = `🌟 <strong>FIDO2 パスキーログイン成功!</strong><br>Key Handle 指定なしで EEPROM から自動検索され、CTAP2 署名が検証されました！`;
+        log(`FIDO2 GetAssertion 成功! Count: ${signCount}, Verify: VALID`);
+      } catch (err) {
+        alertBox.className = "alert alert-error";
+        alertBox.textContent = `失敗: ${err.message}`;
+        log(`FIDO2 GetAssertion 失敗: ${err.message}`, "err");
+      }
+    }
+
+    async function resetKeyStorage() {
+      if (!confirm("Uno R3 上の FIDO2 パスキーストレージ（EEPROM）を初期化しますか？")) return;
+      const p = runCommandLifecycle(null, null, 5000);
+      await sendLine("CTAP2 07"); // 0x07 = authenticatorReset
+      const resp = await p;
+      log(`CTAP2 Reset 完了: ${JSON.stringify(resp)}`);
+      fido2CryptoKey = null;
+      document.getElementById("fido2CredId").textContent = "未登録";
+      document.getElementById("fido2CoseKey").textContent = "None";
+      document.getElementById("fido2FoundCred").textContent = "--";
+      document.getElementById("fido2SignCount").textContent = "--";
+      document.getElementById("fido2VerifyStatus").textContent = "--";
+      alert("FIDO2 ストレージを初期化しました");
+    }
+  </script>
+</body>
+</html>
